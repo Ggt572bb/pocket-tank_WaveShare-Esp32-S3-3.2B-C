@@ -39,3 +39,11 @@ tools/boards.local.sh
 sim/build-square/
 sim/fishsim-square
 sim/build-arm*/
+firmware/build-lcd35b/
+sim/build-lcd35b/
+sim/fishsim-lcd35b
+
+# Local recovery records and Python environments
+backups/
+docs/batlog/lcd35b-local-*
+.venv*/

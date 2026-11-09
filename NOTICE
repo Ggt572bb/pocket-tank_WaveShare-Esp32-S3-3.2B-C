@@ -42,3 +42,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+LCD35B PORT THIRD-PARTY NOTICE
+
+The AXS15231B panel register sequence in firmware/main/lcd35b_init.inc is
+from waveshareteam/ESP32-S3-Touch-LCD-3.5B, revision
+c7dd63c70258da7e3b6dae0c621f30ca62b1e1c9. The sequence is unmodified.
+Its Apache License 2.0 text is preserved in docs/vendor/waveshare-LICENSE.
+The LCD35B hardware port and larger settings layout are additions in this fork.

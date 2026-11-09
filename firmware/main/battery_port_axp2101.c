@@ -269,6 +269,11 @@ bool battery_port_set_rail(const char *name, bool on) {
 }
 /* boot: everything with no consumer off, plus ALDO1 (audio analog, unused) */
 void battery_port_trim_rails(void) {
+#ifdef CONFIG_POCKET_TANK_LCD35B
+    /* The LCD/camera/audio rails differ from the AMOLED. The LCD port
+       initializes the rails it needs; never apply the AMOLED's trim list. */
+    return;
+#endif
     static const char *off[] = { "dcdc2", "dcdc3", "dcdc4", "aldo1", "aldo2", "aldo3", "aldo4", "bldo1", "bldo2", "cpusldo", "dldo1", "dldo2" };
     int n = 0;
     for (size_t i = 0; i < sizeof off / sizeof off[0]; i++) n += battery_port_set_rail(off[i], false);

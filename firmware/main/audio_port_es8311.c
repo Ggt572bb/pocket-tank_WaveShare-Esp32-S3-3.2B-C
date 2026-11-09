@@ -21,11 +21,19 @@
 
 static const char *TAG = "audio";
 
+#ifdef CONFIG_POCKET_TANK_LCD35B
+#define PIN_I2S_MCLK  44
+#define PIN_I2S_BCLK  13
+#define PIN_I2S_WS    15
+#define PIN_I2S_DOUT  16
+#define PIN_AMP_EN    -1       /* amplifier has no GPIO enable on the 3.5B */
+#else
 #define PIN_I2S_MCLK  (board_is_square() ? S_PIN_I2S_MCLK : board_is_175() ? B_PIN_I2S_MCLK : 16)   /* the square: 16 is its PWR key sense; the 1.75: 42 */
 #define PIN_I2S_BCLK  (board_is_watch() ? W_PIN_I2S_BCLK : 9)
 #define PIN_I2S_WS    45
 #define PIN_I2S_DOUT  (board_is_watch() ? W_PIN_I2S_DOUT : 8)        /* ESP -> codec DSDIN */
 #define PIN_AMP_EN    46       /* NS4150B CTRL, 10k pulldown on the board */
+#endif
 #define BLOCK         160      /* 10 ms at 16 kHz */
 #define IDLE_US       (2 * 1000000LL)
 #define CODEC_RAIL    "aldo1"  /* A3V3: the codec's AVDD + the mic */
@@ -55,7 +63,7 @@ static int64_t s_idle_us = 5 * 1000000LL;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-static void amp(bool on) { gpio_set_level(PIN_AMP_EN, on); }
+static void amp(bool on) { if (PIN_AMP_EN >= 0) gpio_set_level(PIN_AMP_EN, on); }
 
 /* Deep sleep (2026-09-16, the night the tank died): the I2S lines and the
  * amp's CTRL are the ESP's outputs into ICs that stay powered on VCC3V3 all
@@ -76,6 +84,7 @@ void audio_port_deep_sleep_pins(void) {
     gpio_num_t QUIET_PINS[QUIET_N]; quiet_pins(QUIET_PINS);
     for (size_t i = 0; i < QUIET_N; i++) {
         gpio_num_t p = QUIET_PINS[i];
+        if (p < 0) continue;
         gpio_reset_pin(p);                        /* off the I2S matrix routing, a GPIO again */
         gpio_set_direction(p, GPIO_MODE_OUTPUT);
         gpio_set_level(p, 0);
@@ -84,7 +93,7 @@ void audio_port_deep_sleep_pins(void) {
 }
 static void release_pins(void) {
     gpio_num_t QUIET_PINS[QUIET_N]; quiet_pins(QUIET_PINS);
-    for (size_t i = 0; i < QUIET_N; i++) gpio_hold_dis(QUIET_PINS[i]);
+    for (size_t i = 0; i < QUIET_N; i++) if (QUIET_PINS[i] >= 0) gpio_hold_dis(QUIET_PINS[i]);
 }
 
 static void write_silence(int ms) {
@@ -117,7 +126,9 @@ static void bring_down(void) {
     write_silence(10);
     i2s_channel_disable(s_tx);
     codec_port_down();
+#ifndef CONFIG_POCKET_TANK_LCD35B
     battery_port_set_rail(CODEC_RAIL, false);
+#endif
     s_up = false;
     ESP_LOGI(TAG, "down (idle)");
 }
@@ -170,8 +181,10 @@ bool audio_port_init(i2c_master_bus_handle_t bus) {
     size_t bank_bytes = (size_t)(_binary_sounds_bin_end - _binary_sounds_bin_start);
     if (bank_bytes != SND_BANK_BYTES) { ESP_LOGW(TAG, "bank is %u bytes, sounds.h says %u: rebuild (tools/make_sounds.py build) - silent", (unsigned)bank_bytes, (unsigned)SND_BANK_BYTES); return false; }
     if (!codec_port_present()) { ESP_LOGW(TAG, "no ES8311: silent"); return false; }
-    gpio_config_t io = { .pin_bit_mask = 1ULL << PIN_AMP_EN, .mode = GPIO_MODE_OUTPUT, .pull_down_en = GPIO_PULLDOWN_ENABLE };
-    gpio_config(&io); amp(false);
+    if (PIN_AMP_EN >= 0) {
+        gpio_config_t io = { .pin_bit_mask = 1ULL << (PIN_AMP_EN & 63), .mode = GPIO_MODE_OUTPUT, .pull_down_en = GPIO_PULLDOWN_ENABLE };
+        gpio_config(&io); amp(false);
+    }
     i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     cc.dma_desc_num = 4; cc.dma_frame_num = BLOCK;
     if (i2s_new_channel(&cc, &s_tx, NULL) != ESP_OK) { ESP_LOGE(TAG, "no I2S channel"); return false; }

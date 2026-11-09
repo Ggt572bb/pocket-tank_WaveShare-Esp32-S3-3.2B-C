@@ -121,6 +121,12 @@ bool imu_port_init(i2c_master_bus_handle_t bus) {
     /* the square, 2026-10-12 (Strato holding it his usual way, the USB at the foot, tilted back): g = [1166 13033 10739] -
        gravity runs +Y in that grip: up = +Y (the 1.8's is -Y) */
     else if (board_is_square()) { s_up_axis = 1; s_up_sign = 1; }
+#ifdef CONFIG_POCKET_TANK_LCD35B
+    /* Physical bring-up: the LCD35B landscape picture was upside down in
+       both grips with the AMOLED's -Y rule. Its upright direction is +Y.
+       Keep the common orientation result for display AND touch. */
+    s_up_axis = 1; s_up_sign = 1;
+#endif
     ESP_LOGI(TAG, "QMI8658 up at 0x%02x: orientation axis %c%s", addr,
              IMU_UP_SIGN > 0 ? '+' : '-', IMU_UP_AXIS == 0 ? "X" : IMU_UP_AXIS == 1 ? "Y" : "Z");
     return true;

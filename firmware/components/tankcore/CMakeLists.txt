@@ -21,6 +21,9 @@ endif()
 # the frame in the panel's byte order on every board (2026-10-23, render.h PT_FB_SWAP): the SPI DMA
 # sends it straight from PSRAM on the flush task; the sim builds without it (its pixel tests)
 target_compile_definitions(${COMPONENT_LIB} PUBLIC PT_FB_SWAP=1)
+if(CONFIG_POCKET_TANK_LCD35B)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC TANK_LCD35B)
+endif()
 if(CONFIG_POCKET_TANK_WATCH)   # the watch's 410 x 502 portrait tank
     target_compile_definitions(${COMPONENT_LIB} PUBLIC TANK_WATCH)
 endif()

@@ -35,6 +35,10 @@
 #define TANK_W 480
 #define TANK_H 480
 #endif
+#ifdef TANK_LCD35B              /* 3:2 landscape LCD; retain the full 448x368 page in a wider world. */
+#define TANK_W 552
+#define TANK_H 368
+#endif
 /* a tank WORN on a wrist (2026-10-02): the picture's way up is the keeper's
  * setting (settings SCREEN), never the live IMU's - the arm swings through
  * every angle (tank_screen_*) */
@@ -218,6 +222,10 @@ typedef enum { VEG_KIND_GRASS, VEG_KIND_SWORD } veg_kind_t;
 #define ALGAE_CELL 20
 #define ALGAE_COLS 24
 #define ALGAE_ROWS 24
+#elif defined(TANK_LCD35B)                     /* 28 x 19 cells cover the wide 552 x 368 world; 532 saved cells. */
+#define ALGAE_CELL 20
+#define ALGAE_COLS 28
+#define ALGAE_ROWS 19
 #else
 #define ALGAE_CELL 16                          /* px per glass-film grid cell */
 #define ALGAE_COLS (TANK_W / ALGAE_CELL)       /* 28 */

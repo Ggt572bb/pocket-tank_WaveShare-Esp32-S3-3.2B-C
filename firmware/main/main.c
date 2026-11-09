@@ -84,7 +84,7 @@ static bool s_rtc;                         /* an RTC chip answered: the wall clo
 #define PWR_SENSE ((gpio_num_t)board_pwr_sense_pin())   /* the round board and the watch: a line that is high while the PWR key is down */
 static bool pwr_sensed(void) { return board_pwr_sense_pin() >= 0; }
 static bool pwr_sense_down(void) { return pwr_sensed() && gpio_get_level(PWR_SENSE); }
-#ifdef CONFIG_POCKET_TANK_DISPLAY_SH8601
+#if defined(CONFIG_POCKET_TANK_DISPLAY_SH8601) || defined(CONFIG_POCKET_TANK_LCD35B)
 extern i2c_master_bus_handle_t board_i2c_bus(void);
 #else
 static i2c_master_bus_handle_t board_i2c_bus(void) { return NULL; }
@@ -129,7 +129,9 @@ static bool s_prefetch_pending; static uint16_t *s_prefetch_fb; static unsigned 
 #define GRASS_CACHE_MS 160
 #define GRASS_LOOP_ON 1                                 /* THE GRASS LOOP (0.3.9.3, render.c): the back grass baked into a loop of moments of its sway; director `grassloop` */
 #define GRASS_LOOP_BUDGET (2816u * 1024)                /* PSRAM for its moments, at most - and never past the plan's headroom (gl_alloc) */
-#if defined(TANK_SQUARE)                                /* its moments, stepped by the clock since THE PACE (render_grass_loop_lock; one a frame before, planned at the board's
+#if defined(TANK_LCD35B)
+#define GRASS_LOOP_MOMENTS 64                           /* wider world on 8 MB: leave room for scene/cache patches */
+#elif defined(TANK_SQUARE)                                /* its moments, stepped by the clock since THE PACE (render_grass_loop_lock; one a frame before, planned at the board's
                                                            frame rate x half the sway's 7 s) - the count sets the step's size and the arena's share, not the sway's speed: */
 #define GRASS_LOOP_MOMENTS 48                           /* the square: 64 filled its arena to the last byte on Strato's grown tank (the PSRAM headroom rule leaves it ~705 KB)
                                                            and every move baked whole at 8 fps; 48 leaves two fifths free for the box patch (0.3.9.4, the soak) */

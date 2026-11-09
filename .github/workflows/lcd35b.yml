@@ -1,0 +1,47 @@
+name: LCD35B port
+
+on:
+  push:
+    branches: [main, port/waveshare-lcd35b]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  focused-regressions:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [rectangle, round, watch, square, lcd35b]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Simulator dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsdl2-dev
+          git clone --depth 1 --branch v9.2.2 https://github.com/lvgl/lvgl.git sim/lvgl
+      - name: Board and input regressions
+        env:
+          BOARD: ${{ matrix.board }}
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          board_args=()
+          case "$BOARD" in
+            round) board_args=(ROUND=1) ;;
+            watch) board_args=(WATCH=1) ;;
+            square) board_args=(SQUARE=1) ;;
+            lcd35b) board_args=(LCD35B=1) ;;
+          esac
+          make -C sim -j"$(nproc)" "${board_args[@]}" check \
+            'SELFTESTS=--selftest-board --selftest-touch-port --selftest-card --selftest-double-tap --selftest-grassloop --selftest-grasspatch --selftest-sleep --selftest-llm'
+      - name: Port geometry and backup validation
+        if: matrix.board == 'lcd35b'
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror firmware/host_test/lcd35b_geometry_test.c -o /tmp/lcd35b-geometry
+          /tmp/lcd35b-geometry
+          python3 tools/test_backup_lcd35b.py
+          python3 -m compileall -q tools

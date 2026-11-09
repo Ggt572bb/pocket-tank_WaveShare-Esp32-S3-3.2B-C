@@ -1,4 +1,10 @@
 menu "pocket-tank"
+    config POCKET_TANK_LCD35B
+        bool "Waveshare ESP32-S3-Touch-LCD-3.5B / 3.5B-C (AXS15231B)"
+        default n
+        help
+            Dedicated LCD, touch, audio and power wiring. A wider 552x368
+            world fills the LCD without cropping or stretching the pages.
     config POCKET_TANK_DISPLAY_SH8601
         bool "Drive the Waveshare 1.8in AMOLED (SH8601 / CO5300 over QSPI)"
         default n

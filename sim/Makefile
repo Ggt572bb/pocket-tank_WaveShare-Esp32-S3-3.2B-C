@@ -17,7 +17,11 @@ SDL_LIBS   := $(shell sdl2-config --libs)
 # ./fishsim-round, built beside the rectangle's in build-round/.
 # `make WATCH=1`: the watch's 410 x 502 portrait tank (the Waveshare 2.06) as ./fishsim-watch
 # `make SQUARE=1`: the square's 480 x 480 tank (the Waveshare 2.16) as ./fishsim-square
-ifdef ROUND
+ifdef LCD35B
+BUILD   := build-lcd35b
+OUT     := fishsim-lcd35b
+ROUNDF  := -DTANK_LCD35B
+else ifdef ROUND
 BUILD   := build-round
 OUT     := fishsim-round
 ROUNDF  := -DTANK_ROUND

@@ -16,6 +16,10 @@
 # update itself. `idf.py flash` also writes the otadata initial image (the
 # tank boots ota_0 again) and, with --model, the model trailer (docs/OTA.md).
 set -euo pipefail
+if [[ "${1:-}" == "--lcd35b" ]]; then
+  shift
+  exec bash "$(dirname "$0")/flash_lcd35b.sh" "$@"
+fi
 cd "$(dirname "$0")/.."
 BUILD=${TANK_BUILD:-~/.cache/pocket-tank/fw-build}   # another checkout (a worktree) builds in its own dir
 PORTS=$(compgen -G '/dev/cu.usbmodem*' | sort || true)

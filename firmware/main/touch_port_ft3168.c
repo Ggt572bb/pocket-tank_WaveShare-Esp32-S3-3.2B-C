@@ -52,6 +52,63 @@
 
 static const char *TAG = "touch";
 static esp_lcd_touch_handle_t s_tp;
+static int64_t s_seen_us; /* last actual contact report, excluding a bridged gap */
+static bool s_log; /* director touch diagnostics */
+#ifdef CONFIG_POCKET_TANK_LCD35B
+#include "lcd35b_geometry.h"
+static i2c_master_dev_handle_t s_axs;
+static bool s_axs_fast_idle;
+static struct {
+    bool down;
+    uint16_t x, y;
+    int empty;
+    int64_t clear_us;
+} s_axs_press;
+static bool axs_read(uint16_t *x, uint16_t *y) {
+    const uint8_t cmd[11] = {0xb5, 0xab, 0xa5, 0x5a, 0, 0, 0, 0x0e, 0, 0, 0};
+    uint8_t d[14] = {0};
+    esp_err_t err = i2c_master_transmit_receive(s_axs, cmd, sizeof cmd, d, sizeof d, 20);
+    /* Match the vendor's acceptance rule: only event 1 means UP. Other
+       event values, including 3, must not suppress a valid contact. */
+    /* On this physical panel no-contact reads are filled with FB bytes,
+       not a zero point count. Treat a complete idle-fill packet as empty,
+       but keep isolated corrupt packets and I2C failures out of the vote. */
+    bool idle = err == ESP_OK && (d[0] == 0xfb || d[0] == 0xff);
+    for (unsigned i = 1; i < sizeof d && idle; i++) idle = d[i] == d[0];
+    bool answered = err == ESP_OK && (idle || (d[0] != 0xff && d[1] <= 2));
+    int64_t now = esp_timer_get_time();
+    int px = ((d[2] & 15) << 8) | d[3], py = ((d[4] & 15) << 8) | d[5], tx, ty;
+    bool finger = answered && !idle && d[1] && (d[2] >> 6) != 1;
+    if (finger && !lcd35b_point(px, py, &tx, &ty)) answered = finger = false;
+    if (finger) {
+        s_axs_press.down = true; s_axs_press.x = px; s_axs_press.y = py;
+        s_seen_us = now; s_axs_press.empty = 0;
+    } else if (answered && s_axs_press.down) {
+        /* One idle packet is bounce, two complete idle replies confirm UP.
+           Polls cluster before a display transfer: an extra delay here
+           merges fast double taps. Ambiguous zero-count gaps need 60 ms;
+           explicit UP reports need 8 ms. Failed reads never vote for UP. */
+        if (!s_axs_press.empty++) s_axs_press.clear_us = now;
+        int64_t quiet = idle ? (s_axs_fast_idle ? 0 : 60000)
+                             : d[1] && (d[2] >> 6) == 1 ? 8000 : 60000;
+        if (s_axs_press.empty >= 2 && now - s_axs_press.clear_us >= quiet) {
+            s_axs_press.down = false; s_axs_press.empty = 0;
+        }
+    } else if (!answered) {
+        /* Missing data is not a release. Re-arming requires a confirmed
+           finger-up; otherwise a held button fires once per I2C timeout. */
+        s_axs_press.empty = 0;
+    }
+    *x = s_axs_press.x; *y = s_axs_press.y;
+    static int64_t logged;
+    if (s_log && now - logged > 200000) {
+        logged = now;
+        ESP_LOGI(TAG, "AXS raw: err %d data %02x %02x %02x %02x %02x %02x | contact %d down %d empty %d",
+                 (int)err, d[0], d[1], d[2], d[3], d[4], d[5], finger, s_axs_press.down, s_axs_press.empty);
+    }
+    return s_axs_press.down;
+}
+#endif
 static bool s_down; static int64_t s_press_us; static float s_px, s_py;
 static open_wait_t s_pg_wait;    /* A PAGE A TAP BROUGHT (0.4.1 audit round 1, TCH-4): the keeper page, the shop, the collection - a
                                     tap that changes between them stamps it, and a tap pressed within OPEN_WAIT_US is that tap's
@@ -179,7 +236,6 @@ static bool s_lift_said = true;                   /* a report that says "no fing
 static int s_cst_gaps;                            /* reads inside a press that showed no finger (the stroke log) */
 static int s_cst_said, s_cst_back, s_cst_maxgap_ms, s_cst_again_ms = -1;   /* ... "no finger" reports, a finger after one, the longest silence, ms since the last lift at the press */
 static bool s_cst_by_said;                        /* ... and how the press ended */
-static int64_t s_seen_us;                         /* the last read that showed a finger, any chip: a press is timed to it, not to the lift's bridge */
 void touch_port_set_lift(int ms, int said) { if (ms > 0) s_lift_us = ms * 1000; if (said >= 0) s_lift_said = said; }
 int  touch_port_lift_ms(void) { return s_lift_us / 1000; }
 bool touch_port_lift_said(void) { return s_lift_said; }
@@ -268,6 +324,11 @@ static bool ft3168_read(uint16_t *x, uint16_t *y) {
 }
 /* one read of the glass, whichever chip: true while a finger is down, in panel px */
 static bool panel_read(uint16_t *x, uint16_t *y) {
+#ifdef CONFIG_POCKET_TANK_LCD35B
+    if (s_axs) {
+        return axs_read(x, y);
+    }
+#endif
     if (s_cst) return cst9217_read(x, y);
     if (s_ft) return ft3168_read(x, y);
     if (!s_tp) return false;
@@ -279,6 +340,13 @@ static bool panel_read(uint16_t *x, uint16_t *y) {
 }
 
 bool touch_port_init(void) {
+#ifdef CONFIG_POCKET_TANK_LCD35B
+    i2c_device_config_t cfg = {.dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = 0x3b, .scl_speed_hz = 400000};
+    if (i2c_master_bus_add_device(board_i2c_bus(), &cfg, &s_axs) != ESP_OK) return false;
+    ESP_LOGI(TAG, "AXS15231B touch ready (landscape fit)");
+    return true;
+#endif
     if (board_is_round() || board_is_square()) return cst9217_init();
     if (board_is_watch()) return ft3168_init();
     esp_lcd_panel_io_handle_t io;
@@ -429,6 +497,12 @@ static void cal_point(float rx, float ry, float *tx, float *ty) {               
 static int s_raw_x0 = TANK_W, s_raw_x1 = -1, s_raw_y0 = TANK_H, s_raw_y1 = -1;
 void touch_port_raw_seen(int *x0, int *x1, int *y0, int *y1) { *x0 = s_raw_x0; *x1 = s_raw_x1; *y0 = s_raw_y0; *y1 = s_raw_y1; }
 static void map_touch(uint16_t px, uint16_t py, float *tx, float *ty) {
+#ifdef CONFIG_POCKET_TANK_LCD35B
+    display_port_panel_to_tank(px, py, tx, ty);
+    touch_fit_apply(adv_touch_fit(), tx, ty, 0);
+    tank_quarter_from_upright(s_q, tx, ty);
+    return;
+#endif
     int ox, oy; display_port_frame_origin(&ox, &oy);  /* a panel bigger than the frame (the rectangle image on the watch): the frame's corner */
     int fx = (int)px - ox, fy = (int)py - oy;
     /* the raw report in tank space AS IF UPRIGHT: the calibration below is the
@@ -491,7 +565,6 @@ static void map_touch(uint16_t px, uint16_t py, float *tx, float *ty) {
 #define EDGE_LAND_X    0.5f
 static float s_sx, s_sy, s_reach;                 /* this stroke: its landing point, how far the stretch is in (0..1) */
 static float s_ex0;                               /* ... and its landing x fully stretched */
-static bool  s_log;                               /* director `touch log on`: one line per press, at its release */
 static float s_dx0, s_dx1, s_dlx, s_dly; static int s_frames, s_raw_px, s_raw_py;   /* ... what it reports */
 void touch_port_set_log(bool on) { s_log = on; }
 static float edge_stretch1(float v, float lo, float hi, float max, float band, float snap) {
@@ -582,7 +655,18 @@ void touch_port_poll(tank_t *t) {
         }
         gen = t->roster_shift; seen = true;
     }
+#ifdef CONFIG_POCKET_TANK_LCD35B
+    if (!s_axs) return;
+    /* Fast releases belong to the bare-water double-tap gesture. Menus,
+       cards, buttons and tools keep their longer hold confirmation. */
+    s_axs_fast_idle = t->tool == TOOL_HAND && !s_press_btn && s_sel < 0
+        && !s_ms && !s_set && !s_shop && !s_coll && !s_cf && !s_bat && !s_upd && !s_shelf
+        && !setup_active() && !adv_up() && !link_dev_page_up()
+        && !render_card_over_tank(t) && !render_gift_up(t) && !notice_current()
+        && (!s_down || now - s_press_us < TAP_QUICK_US);
+#else
     if (!s_tp && !s_cst && !s_ft) return;
+#endif
     uint16_t x[1], y[1];
     bool touched = panel_read(x, y);
     /* portrait panel (px,py) -> landscape tank (tx,ty): tx = TANK_W-1-py, ty = px;

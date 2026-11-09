@@ -5390,20 +5390,28 @@ static bool gl_geometry(const tank_t *t) {         /* the band the back grass ne
    from g_scene; were one ever not, it carries them. The runs average 1.2 px (a blade shifts a pixel: one bare, one grass, rarely
    side by side), and the old run - x, length, then colors - spent two words of header on each: the moments ~half the size now,
    twice as many in an arena (the square's tall grass: 15 moments, too steppy - docs/grass-loop-compact.md) */
-#define GLR_X(h)     ((h) & 0x1ff)
-#define GLR_LEN(h)   ((((h) >> 9) & 31) + 1)
+/* Keep 16-bit headers: a world wider than 512 needs one more X bit,
+   leaving four length bits (16-pixel runs). This cache is never persisted.
+   Existing boards retain their original nine X / five length bits. */
+#if TANK_W > 512
+#define GLR_X_BITS 10
+#else
+#define GLR_X_BITS 9
+#endif
+#define GLR_MAXLEN   (1u << (14 - GLR_X_BITS))
+#define GLR_X(h)     ((h) & ((1u << GLR_X_BITS) - 1))
+#define GLR_LEN(h)   ((((h) >> GLR_X_BITS) & (GLR_MAXLEN - 1)) + 1)
 #define GLR_CARRY    0x4000u
 #define GLR_BARE     0x8000u
-#define GLR_MAXLEN   32
 #define GLR_WORDS(h) (1 + (((h) & GLR_CARRY) ? GLR_LEN(h) : 0))
-_Static_assert(TANK_W <= 512, "a run's x is 9 bits");
+_Static_assert(TANK_W <= (1 << GLR_X_BITS), "a grass run must hold the world's x coordinates");
 static inline bool gl_run_put(uint16_t *dst, size_t cap, size_t *w, int *run, int *count, int x, uint16_t c, bool bare, uint16_t sc) {   /* pixel x onto the row's runs */
     const uint16_t fl = bare ? (c == sc ? GLR_BARE : (GLR_BARE | GLR_CARRY)) : GLR_CARRY;
     if (*run >= 0) {                                 /* (the open run - the last written - extended when it is the same kind, next to it, not full) */
         const uint16_t h = dst[*run];
         if ((h & (GLR_BARE | GLR_CARRY)) == fl && GLR_X(h) + GLR_LEN(h) == x && GLR_LEN(h) < GLR_MAXLEN) {
             if (fl & GLR_CARRY) { if (*w >= cap) return false; dst[(*w)++] = c; }
-            dst[*run] = (uint16_t)(h + (1u << 9));
+            dst[*run] = (uint16_t)(h + (1u << GLR_X_BITS));
             return true;
         }
     }
@@ -5538,7 +5546,7 @@ static bool gl_copy_runs(uint16_t *dst, size_t cap, size_t *w, int *count, const
         if (s > e) continue;
         const size_t carried = (fl & GLR_CARRY) ? (size_t)(e - s + 1) : 0;
         if (*w + 1 + carried > cap) return false;
-        dst[(*w)++] = (uint16_t)(s | fl | ((e - s) << 9));
+        dst[(*w)++] = (uint16_t)(s | fl | ((e - s) << GLR_X_BITS));
         if (carried) { memcpy(dst + *w, px + (s - x), carried * 2); *w += carried; }
         (*count)++;
     }
@@ -10034,19 +10042,42 @@ static const char *const SET_SCREEN[2] = { "NORMAL", "TURNED" };   /* the defaul
 #endif
 
 static void link_glyph(ctx_t *c, int x, int y, uint32_t rgb);   /* the link mode section, at the end */
+/* Settings have their own canvas: use the LCD's full width without changing
+ * the centered page space used by the other dialogs or by advanced setup. */
+typedef struct {
+    int ox, oy, width, label_x, seg_x, seg_w, seg_dx, seg_h, span, knob_w;
+    int close_x, close_w, upd_x, upd_w, link_x, link_w, foot_h, scale, title_scale;
+} settings_layout_t;
+#ifdef TANK_LCD35B
+static const settings_layout_t sl = {
+    .ox = 0, .oy = 0, .width = TANK_W, .label_x = 24,
+    .seg_x = 236, .seg_w = 90, .seg_dx = 96, .seg_h = 44, .span = 282, .knob_w = 90,
+    .close_x = 376, .close_w = 152, .upd_x = 24, .upd_w = 152,
+    .link_x = 204, .link_w = 124, .foot_h = 40, .scale = 3, .title_scale = 4
+};
+#else
+static const settings_layout_t sl = {
+    .ox = PAGE_X, .oy = PAGE_Y, .width = PAGE_W, .label_x = SET_LABEL_X,
+    .seg_x = SET_SEG_X, .seg_w = SET_SEG_W, .seg_dx = SET_SEG_DX, .seg_h = SET_SEG_H,
+    .span = SET_SPAN_W, .knob_w = SET_KNOB_W,
+    .close_x = SET_CLOSE_X, .close_w = MSP_CLOSE_W, .upd_x = SET_UPD_X, .upd_w = SET_UPD_W,
+    .link_x = SET_LINK_X, .link_w = SET_LINK_W, .foot_h = MSP_CLOSE_H, .scale = 2, .title_scale = 3
+};
+#endif
+static int settings_knob_x(int pct) { return sl.seg_x + sl.knob_w / 2 + pct * (sl.span - sl.knob_w) / 100; }
 static void set_row(ctx_t *c, int row_y, const char *label, const char *const names[], int n, int chosen) {
-    draw_text(c, SET_LABEL_X, row_y, 2, MSP_TEAL, label);
+    draw_text(c, sl.label_x, row_y, sl.scale, MSP_TEAL, label);
     for (int i = 0; i < n; i++) {
-        int x = SET_SEG_X + i * SET_SEG_DX, y = SET_SEG_Y(row_y);
+        int x = sl.seg_x + i * sl.seg_dx, y = SET_SEG_Y(row_y);
         if (i == chosen) {                       /* lit: teal, ink lettering */
-            button(c, x, y, SET_SEG_W, SET_SEG_H, MSP_TEAL, MSP_TEAL, names[i], 2);
-            draw_text(c, x + (SET_SEG_W - text_w(names[i], 2)) / 2, y + (SET_SEG_H - 14) / 2, 2, MSP_INK, names[i]);
-        } else button(c, x, y, SET_SEG_W, SET_SEG_H, 0x1c2f36, MSP_DIM, names[i], 2);
+            button(c, x, y, sl.seg_w, sl.seg_h, MSP_TEAL, MSP_TEAL, names[i], sl.scale);
+            draw_text(c, x + (sl.seg_w - text_w(names[i], sl.scale)) / 2, y + (sl.seg_h - 7 * sl.scale) / 2, sl.scale, MSP_INK, names[i]);
+        } else button(c, x, y, sl.seg_w, sl.seg_h, 0x1c2f36, MSP_DIM, names[i], sl.scale);
     }
 }
 /* the percent a finger at page x asks of a slider running lo .. 100: the nearest step (the rail is 0 .. 100 for all) */
 static int set_slider_at(float x, int lo, int step) {
-    float f = (x - SET_BRT_X0) / (float)(SET_BRT_X1 - SET_BRT_X0);
+    float f = (x - (sl.seg_x + sl.knob_w / 2)) / (float)(sl.span - sl.knob_w);
     int pct = (int)lroundf(f * 100 / step) * step;
     return pct < lo ? lo : pct > 100 ? 100 : pct;
 }
@@ -10057,23 +10088,23 @@ static int set_volume_at(float x) { return set_slider_at(x, 0, SET_VOL_STEP); }
  * lit button with the percent on it in ink. VOLUME's knob at 0 says OFF and
  * goes out (an outline, teal letters): off by fill and word, not by hue. */
 static void set_slider(ctx_t *c, int row_y, const char *label, int lo, int pct) {
-    int y = SET_SEG_Y(row_y), cy = y + SET_SEG_H / 2;
+    int y = SET_SEG_Y(row_y), cy = y + sl.seg_h / 2;
     pct = pct < lo ? lo : pct > 100 ? 100 : pct;
-    int kx = SET_BRT_X(pct);                                /* (one scale: equal percents line up) */
-    draw_text(c, SET_LABEL_X, row_y, 2, MSP_TEAL, label);
-    rect_fill(c, SET_SEG_X + 4, cy - 3, kx - SET_SEG_X - 4, 6, MSP_TEAL);
-    rect_fill(c, kx, cy - 3, SET_SEG_X + SET_SPAN_W - 4 - kx, 6, 0x1c2f36);
-    rect_edge(c, kx, cy - 3, SET_SEG_X + SET_SPAN_W - 4 - kx, 6, MSP_DIM);
+    int kx = settings_knob_x(pct);                                /* (one scale: equal percents line up) */
+    draw_text(c, sl.label_x, row_y, sl.scale, MSP_TEAL, label);
+    rect_fill(c, sl.seg_x + 4, cy - 3, kx - sl.seg_x - 4, 6, MSP_TEAL);
+    rect_fill(c, kx, cy - 3, sl.seg_x + sl.span - 4 - kx, 6, 0x1c2f36);
+    rect_edge(c, kx, cy - 3, sl.seg_x + sl.span - 4 - kx, 6, MSP_DIM);
     char txt[8]; snprintf(txt, sizeof txt, pct ? "%d%%" : "OFF", pct);
     bool off = pct == 0;
-    button(c, kx - SET_KNOB_W / 2, y, SET_KNOB_W, SET_SEG_H, off ? 0x1c2f36 : MSP_TEAL, MSP_TEAL, "", 2);
-    draw_text(c, kx - text_w(txt, 2) / 2, y + (SET_SEG_H - 14) / 2, 2, off ? MSP_TEAL : MSP_INK, txt);
+    button(c, kx - sl.knob_w / 2, y, sl.knob_w, sl.seg_h, off ? 0x1c2f36 : MSP_TEAL, MSP_TEAL, "", sl.scale);
+    draw_text(c, kx - text_w(txt, sl.scale) / 2, y + (sl.seg_h - 7 * sl.scale) / 2, sl.scale, off ? MSP_TEAL : MSP_INK, txt);
 }
 /* an arrow button of the LIGHTS OUT row: dim at the end of the list */
 static void set_arrow(ctx_t *c, int x, int y, bool right, bool live) {
     uint32_t rgb = live ? MSP_TEAL : 0x2c4a52;
-    button(c, x, y, SET_ARW_W, SET_SEG_H, 0x1c2f36, rgb, "", 2);
-    int cx = x + SET_ARW_W / 2, cy = y + SET_SEG_H / 2;
+    button(c, x, y, SET_ARW_W, sl.seg_h, 0x1c2f36, rgb, "", sl.scale);
+    int cx = x + SET_ARW_W / 2, cy = y + sl.seg_h / 2;
     for (int i = 0; i < 7; i++) {                           /* a solid triangle, 7 wide, 13 tall */
         int px = right ? cx - 3 + i : cx + 3 - i, hh = 6 - i;
         rect_fill(c, px, cy - hh, 1, 2 * hh + 1, rgb);
@@ -10101,36 +10132,36 @@ static void set_lock_icon(ctx_t *c, int cx, int cy, bool locked, uint32_t rgb) {
 }
 #endif
 void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, int volume) {
-    ctx_t c = ctx_page(fb, stride);
-    rect_fill(&c, -PAGE_X, -PAGE_Y, TANK_W, TANK_H, MSP_INK);
-    draw_text(&c, (PAGE_W - text_w("SETTINGS", 3)) / 2, SET_TITLE_Y, 3, 0xffffff, "SETTINGS");
+    ctx_t c = ctx_page(fb, stride); c.ox = -sl.ox; c.oy = -sl.oy;
+    rect_fill(&c, -sl.ox, -sl.oy, TANK_W, TANK_H, MSP_INK);
+    draw_text(&c, (sl.width - text_w("SETTINGS", sl.title_scale)) / 2, SET_TITLE_Y, sl.title_scale, 0xffffff, "SETTINGS");
     set_slider(&c, SET_ROW1_Y, "BRIGHTNESS", SET_BRT_MIN, bright_pct);
     set_slider(&c, SET_ROW2_Y, "VOLUME", 0, volume);
     /* LIGHTS OUT: < the choice > */
     {
         int ch = tank_light_choice(t), y = SET_SEG_Y(SET_ROW3_Y);
-        int bx = SET_SEG_X + SET_ARW_W + 4, bw = SET_SPAN_W - 2 * (SET_ARW_W + 4);
-        draw_text(&c, SET_LABEL_X, SET_ROW3_Y, 2, MSP_TEAL, "LIGHTS OUT");
-        set_arrow(&c, SET_SEG_X, y, false, ch > 0);
-        button(&c, bx, y, bw, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
-        draw_text(&c, bx + (bw - text_w(SET_LIGHT[ch], 2)) / 2, y + (SET_SEG_H - 14) / 2, 2, MSP_INK, SET_LIGHT[ch]);
-        set_arrow(&c, SET_SEG_X + SET_SPAN_W - SET_ARW_W, y, true, ch < LIGHT_IDLE_N);
+        int bx = sl.seg_x + SET_ARW_W + 4, bw = sl.span - 2 * (SET_ARW_W + 4);
+        draw_text(&c, sl.label_x, SET_ROW3_Y, sl.scale, MSP_TEAL, "LIGHTS OUT");
+        set_arrow(&c, sl.seg_x, y, false, ch > 0);
+        button(&c, bx, y, bw, sl.seg_h, MSP_TEAL, MSP_TEAL, "", sl.scale);
+        draw_text(&c, bx + (bw - text_w(SET_LIGHT[ch], sl.scale)) / 2, y + (sl.seg_h - 7 * sl.scale) / 2, sl.scale, MSP_INK, SET_LIGHT[ch]);
+        set_arrow(&c, sl.seg_x + sl.span - SET_ARW_W, y, true, ch < LIGHT_IDLE_N);
     }
     set_row(&c, SET_ROW4_Y, "AUTO FEED", SET_FEED, 2, t->autofeed_off ? 1 : 0);
 #if TANK_WORN
     /* SCREEN (2026-10-02): the way up of a watch worn either way round - TURNED
        for buttons toward the elbow. The picture turns as the finger lifts. */
     set_row(&c, SET_ROW5_Y, "SCREEN", SET_SCREEN, 2, t->screen_turned ? 1 : 0);
-    draw_text(&c, SET_LABEL_X, SET_NOTE5_Y, 2, MSP_QUIET, "WORN THE OTHER WAY AROUND?");
+    draw_text(&c, sl.label_x, SET_NOTE5_Y, sl.scale, MSP_QUIET, "WORN THE OTHER WAY AROUND?");
 #else
     /* ROTATION (0.3.2): the picture turns over with the tank, unless locked */
     {
-        int x = SET_SEG_X, y = SET_SEG_Y(SET_ROW5_Y);
-        draw_text(&c, SET_LABEL_X, SET_ROW5_Y, 2, MSP_TEAL, "ROTATION");
-        if (t->orient_lock) button(&c, x, y, SET_SEG_W, SET_SEG_H, MSP_TEAL, MSP_TEAL, "", 2);
-        else                button(&c, x, y, SET_SEG_W, SET_SEG_H, 0x1c2f36, MSP_DIM, "", 2);
-        set_lock_icon(&c, x + SET_SEG_W / 2, y + SET_SEG_H / 2 + 1, t->orient_lock, t->orient_lock ? MSP_INK : MSP_TEAL);
-        draw_text(&c, SET_ROT_WORD_X, SET_ROW5_Y, 2, t->orient_lock ? 0xffffff : MSP_QUIET, t->orient_lock ? "LOCKED" : "UNLOCKED");
+        int x = sl.seg_x, y = SET_SEG_Y(SET_ROW5_Y);
+        draw_text(&c, sl.label_x, SET_ROW5_Y, sl.scale, MSP_TEAL, "ROTATION");
+        if (t->orient_lock) button(&c, x, y, sl.seg_w, sl.seg_h, MSP_TEAL, MSP_TEAL, "", sl.scale);
+        else                button(&c, x, y, sl.seg_w, sl.seg_h, 0x1c2f36, MSP_DIM, "", sl.scale);
+        set_lock_icon(&c, x + sl.seg_w / 2, y + sl.seg_h / 2 + 1, t->orient_lock, t->orient_lock ? MSP_INK : MSP_TEAL);
+        draw_text(&c, (sl.seg_x + sl.seg_w + 14), SET_ROW5_Y, sl.scale, t->orient_lock ? 0xffffff : MSP_QUIET, t->orient_lock ? "LOCKED" : "UNLOCKED");
     }
 #endif
     /* the firmware version, hugging the bottom left of the frame (6 px up,
@@ -10143,22 +10174,22 @@ void render_settings(const tank_t *t, uint16_t *fb, int stride, int bright_pct, 
     /* 2026-09-29: the release number first ("V0.2.0 ALPHA"), the build id after it */
     char ver[64]; snprintf(ver, sizeof ver, "V%s %s  BUILD %s", PT_RELEASE, PT_RELEASE_STAGE, version_port_string());
 #if TANK_WORN                                    /* the watch: centred under the foot, between the lower corners */
-    draw_text_8px(&c, (PAGE_W - ((int)strlen(ver) * 6 - 1)) / 2, SET_FOOT_Y + MSP_CLOSE_H + 2, MSP_DIM, ver);
+    draw_text_8px(&c, (sl.width - ((int)strlen(ver) * 6 - 1)) / 2, SET_FOOT_Y + sl.foot_h + 2, MSP_DIM, ver);
 #else
-    draw_text_8px(&c, SET_LABEL_X + (PAGE_BOWL ? 96 : 0), PAGE_H - 8 - 6, MSP_DIM, ver);
+    draw_text_8px(&c, sl.label_x + (PAGE_BOWL ? 96 : 0), PAGE_H - 8 - 6, MSP_DIM, ver);
 #endif
-    button(&c, SET_CLOSE_X, SET_FOOT_Y, MSP_CLOSE_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "CLOSE", 2);
+    button(&c, sl.close_x, SET_FOOT_Y, sl.close_w, sl.foot_h, 0x1c2f36, MSP_TEAL, "CLOSE", sl.scale);
     /* UPDATES (2026-09-30, docs/OTA.md): bottom left, the same size as CLOSE */
-    button(&c, SET_UPD_X, SET_FOOT_Y, SET_UPD_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "UPDATES", 2);
+    button(&c, sl.upd_x, SET_FOOT_Y, sl.upd_w, sl.foot_h, 0x1c2f36, MSP_TEAL, "UPDATES", sl.scale);
     /* LINK (0.4, the tank link): the glyph - two tanks, a door between - and the word */
-    button(&c, SET_LINK_X, SET_LINK_Y, SET_LINK_W, MSP_CLOSE_H, 0x1c2f36, MSP_TEAL, "", 2);
-    { int gw = 20 + 8 + text_w("LINK", 2), gx = SET_LINK_X + (SET_LINK_W - gw) / 2;
-      link_glyph(&c, gx, SET_LINK_Y + (MSP_CLOSE_H - 12) / 2, 0xffffff);
-      draw_text(&c, gx + 28, SET_LINK_Y + (MSP_CLOSE_H - 14) / 2, 2, 0xffffff, "LINK"); }
+    button(&c, sl.link_x, SET_LINK_Y, sl.link_w, sl.foot_h, 0x1c2f36, MSP_TEAL, "", sl.scale);
+    { int gw = 20 + 8 + text_w("LINK", sl.scale), gx = sl.link_x + (sl.link_w - gw) / 2;
+      link_glyph(&c, gx, SET_LINK_Y + (sl.foot_h - 12) / 2, 0xffffff);
+      draw_text(&c, gx + 28, SET_LINK_Y + (sl.foot_h - 7 * sl.scale) / 2, sl.scale, 0xffffff, "LINK"); }
 }
 static int set_segment(float x, int n) {
-    if (x < SET_SEG_X - 10) return -1;
-    int i = (int)((x - SET_SEG_X + 3) / SET_SEG_DX);
+    if (x < sl.seg_x - 10) return -1;
+    int i = (int)((x - sl.seg_x + 3) / sl.seg_dx);
     return i < 0 ? 0 : i >= n ? n - 1 : i;
 }
 /* the hit test: what a TAP at (x,y) means. *value: BRIGHT the percent the
@@ -10168,16 +10199,16 @@ static int set_segment(float x, int n) {
  * left and right halves). */
 enum { SET_HIT_LIGHT_PREV = 100, SET_HIT_LIGHT_NEXT };
 int render_settings_tap(float x, float y, int *value) {
-    x -= PAGE_X; y -= PAGE_Y;                    /* the page's own coordinates */
-    if (x >= SET_CLOSE_X - 8 && y >= SET_FOOT_Y - 4) return SET_TAP_CLOSE;
-    if (x < SET_UPD_X + SET_UPD_W + 8 && y >= SET_FOOT_Y - 4) return SET_TAP_UPDATES;
-    if (x >= SET_LINK_X - 8 && x < SET_LINK_X + SET_LINK_W + 8 && y >= SET_LINK_Y - 6 && y < SET_LINK_Y + MSP_CLOSE_H + 10) return SET_TAP_LINK;
+    x -= sl.ox; y -= sl.oy;                    /* the page's own coordinates */
+    if (x >= sl.close_x - 8 && y >= SET_FOOT_Y - 4) return SET_TAP_CLOSE;
+    if (x < sl.upd_x + sl.upd_w + 8 && y >= SET_FOOT_Y - 4) return SET_TAP_UPDATES;
+    if (x >= sl.link_x - 8 && x < sl.link_x + sl.link_w + 8 && y >= SET_LINK_Y - 6 && y < SET_LINK_Y + sl.foot_h + 10) return SET_TAP_LINK;
     /* the row bands: from a little above each segment down to the next row
        (fingers report low); the last one stops at the foot's */
     int seg = set_segment(x, 3), two = set_segment(x, 2);
     if (y >= SET_SEG_Y(SET_ROW1_Y) - 12 && y < SET_SEG_Y(SET_ROW2_Y) - 12) { if (seg < 0) return SET_TAP_NONE; *value = set_bright_at(x); return SET_TAP_BRIGHT; }
     if (y >= SET_SEG_Y(SET_ROW2_Y) - 12 && y < SET_SEG_Y(SET_ROW3_Y) - 12) { if (seg < 0) return SET_TAP_NONE; *value = set_volume_at(x); return SET_TAP_VOLUME; }
-    if (y >= SET_SEG_Y(SET_ROW3_Y) - 12 && y < SET_SEG_Y(SET_ROW4_Y) - 12) { if (seg < 0) return SET_TAP_NONE; *value = 0; return x < SET_SPAN_MID ? SET_HIT_LIGHT_PREV : SET_HIT_LIGHT_NEXT; }
+    if (y >= SET_SEG_Y(SET_ROW3_Y) - 12 && y < SET_SEG_Y(SET_ROW4_Y) - 12) { if (seg < 0) return SET_TAP_NONE; *value = 0; return x < (sl.seg_x + sl.span / 2) ? SET_HIT_LIGHT_PREV : SET_HIT_LIGHT_NEXT; }
     if (y >= SET_SEG_Y(SET_ROW4_Y) - 12 && y < SET_SEG_Y(SET_ROW5_Y) - 12) { if (two < 0) return SET_TAP_NONE; *value = two == 0; return SET_TAP_FEED; }
     if (y >= SET_SEG_Y(SET_ROW5_Y) - 12 && y < SET_FOOT_Y - 4) {
         if (two < 0) return SET_TAP_NONE;
@@ -10212,7 +10243,7 @@ int render_settings_touch(tank_t *t, float x, float y, bool down, int *value) {
         }
     } else if (down && (s_set_hit == SET_TAP_BRIGHT || s_set_hit == SET_TAP_VOLUME)) {   /* a slider under a finger: the knob follows it along the row, */
         bool brt = s_set_hit == SET_TAP_BRIGHT;
-        int v = brt ? set_bright_at(x - PAGE_X) : set_volume_at(x - PAGE_X);   /* however far up or down the finger wanders */
+        int v = brt ? set_bright_at(x - sl.ox) : set_volume_at(x - sl.ox);   /* however far up or down the finger wanders */
         if (v != s_set_hv) { s_set_hv = v; r = brt ? SET_TAP_BRIGHT_LIVE : SET_TAP_VOLUME_LIVE; *value = v; }
     } else if (!down && s_set_down && (s_set_hit == SET_TAP_BRIGHT || s_set_hit == SET_TAP_VOLUME)) {   /* let go: the last step it showed is the setting */
         r = s_set_hit; *value = s_set_hv;

@@ -200,6 +200,10 @@ static void show_ids(const tank_t *t) {
     }
 }
 static void show_state(const tank_t *t) {
+    ESP_LOGI(TAG, "lights: %s | manual %s | override %s | tool %s | tap count %d, gap %.3f s",
+             t->light_auto ? "AUTO" : "DOUBLE-TAP", t->light_manual_off ? "off" : "on",
+             t->light_override ? "on" : "off", t->tool == TOOL_HAND ? "HAND" : t->tool == TOOL_SPONGE ? "SPONGE" : "SCISSORS",
+             t->tap_count, t->tap_burst_t);
     for (int i = 0; i < t->n_fish; i++) {
         const fish_t *f = &t->fish[i];
         ESP_LOGI(TAG, "%d %-6s %-5s age %.1fh size %.2f hunger %.1f energy %.1f stress %.1f curiosity %.1f trust %.1f social %.3f (born %.2f) bold %.3f (born %.2f) ms %03x  %s at %.0f,%.0f",

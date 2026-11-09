@@ -1,4 +1,26 @@
-# pocket-tank 🐟
+# Pocket Tank — Waveshare LCD 3.5B-C fork
+
+This fork adds support for the **Waveshare ESP32-S3-Touch-LCD-3.5B-C**
+to [mediacutlet/pocket-tank](https://github.com/mediacutlet/pocket-tank),
+based on upstream commit `952ef4d` (v0.4.1 alpha).
+
+- Full-screen landscape tank, correct auto-rotation and matching touch coordinates.
+- Larger, full-width Settings with readable labels and controls.
+- Held-input filtering and working double-tap lighting, confirmed on hardware.
+- Original on-device AI, fish progression and saves retained.
+
+Start with the **[board build and installation guide](docs/board-lcd-3.5b-c.md)**.
+Use the LCD35B cable build; the upstream web installer and OTA releases target
+other boards. Camera capture, microphone recording and SDMMC are not enabled.
+Continuous USB operation uses the existing manual-lighting and auto-feed defaults;
+long-term desktop soak testing and display performance work remain open.
+
+![LCD35B simulator preview](docs/media/lcd35b-simulator.png)
+
+The original project documentation follows. Its supported-board and installation
+instructions describe upstream; use the guide above for this board.
+
+---
 
 **A tiny language model keeps a fish tank alive on an $8 chip.**
 The ESP32-S3 board, with screen and battery used in this project is actually around $35.

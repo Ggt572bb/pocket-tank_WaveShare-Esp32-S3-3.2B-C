@@ -29,6 +29,9 @@
 #ifndef TOUCH_PORT_SRC
 #define TOUCH_PORT_SRC "../firmware/main/touch_port_ft3168.c"
 #endif
+#ifdef TANK_LCD35B
+#define CONFIG_POCKET_TANK_LCD35B 1
+#endif
 #include TOUCH_PORT_SRC
 
 /* ---- the host's ESP-IDF ---- */
@@ -46,6 +49,10 @@ struct host_io { int unused; };
 static struct host_i2c_bus g_bus; static struct host_i2c_dev g_dev[4]; static int g_ndev;
 static struct host_tp g_tp; static struct host_io g_io;
 static bool g_down; static int g_rx, g_ry;                 /* the finger, in the chip's own report */
+static int g_axs_fault; /* 1 timeout, 2 empty, 3 invalid, 4 single UP, 5 FB, 6 FF */
+static int g_axs_release_pattern;
+static int g_axs_event = 2; /* CONTACT, as observed on the physical panel */
+static bool g_axs_one_idle;
 i2c_master_bus_handle_t board_i2c_bus(void) { return &g_bus; }
 esp_err_t i2c_master_probe(i2c_master_bus_handle_t b, uint16_t a, int t) { (void)b; (void)a; (void)t; return ESP_OK; }
 esp_err_t i2c_master_bus_add_device(i2c_master_bus_handle_t b, const i2c_device_config_t *c, i2c_master_dev_handle_t *d) {
@@ -56,6 +63,21 @@ esp_err_t i2c_master_transmit(i2c_master_dev_handle_t d, const uint8_t *w, size_
 esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t d, const uint8_t *w, size_t wn, uint8_t *r, size_t rn, int t) {
     (void)w; (void)wn; (void)t;
     memset(r, 0, rn);
+    if (d->addr == 0x3b && wn == 11 && rn == 14 && w[0] == 0xb5 && w[1] == 0xab) {
+        int fill = g_down ? g_axs_fault : g_axs_release_pattern;
+        if (fill == 5 || fill == 6) {
+            memset(r, fill == 5 ? 0xfb : 0xff, rn);
+            if (g_down && g_axs_one_idle) g_axs_fault = 0;
+            return ESP_OK;
+        }
+        if (g_down && g_axs_fault == 1) return ESP_FAIL;
+        if (g_down && g_axs_fault == 2) return ESP_OK;
+        if (g_down && g_axs_fault == 3) { r[0] = 0xff; return ESP_OK; }
+        if (g_down && g_axs_fault == 4) { r[1] = 1; r[2] = 0x40; g_axs_fault = 0; return ESP_OK; }
+        if (g_down) { r[1] = 1; r[2] = (g_axs_event << 6) | ((g_rx >> 8) & 15); r[3] = g_rx; r[4] = (g_ry >> 8) & 15; r[5] = g_ry; }
+        else if (!g_axs_release_pattern) { r[1] = 1; r[2] = 0x40; } /* explicit finger-up report */
+        return ESP_OK;
+    }
     if (d->addr == I2C_ADDR_CST9217 && rn >= 10) {          /* a report: AB in byte 6; a finger = 06 in byte 0's low nibble, a count in 5 */
         r[6] = 0xAB;
         if (g_down) { r[0] = 0x06; r[5] = 1; r[1] = (uint8_t)(g_rx >> 4); r[2] = (uint8_t)(g_ry >> 4); r[3] = (uint8_t)(((g_rx & 15) << 4) | (g_ry & 15)); }
@@ -81,7 +103,9 @@ bool esp_lcd_touch_get_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, uint1
     x[0] = (uint16_t)g_rx; y[0] = (uint16_t)g_ry; *n = 1; return true;
 }
 /* ---- the board: this world's ---- */
-#if defined(TANK_ROUND)
+#if defined(TANK_LCD35B)
+#define HB_LCD35B 1
+#elif defined(TANK_ROUND)
 #define HB_ROUND 1
 #elif defined(TANK_WATCH)
 #define HB_WATCH 1
@@ -92,6 +116,9 @@ bool esp_lcd_touch_get_coordinates(esp_lcd_touch_handle_t tp, uint16_t *x, uint1
 #endif
 #ifndef HB_ROUND
 #define HB_ROUND 0
+#endif
+#ifndef HB_LCD35B
+#define HB_LCD35B 0
 #endif
 #ifndef HB_WATCH
 #define HB_WATCH 0
@@ -108,7 +135,13 @@ bool board_is_square(void) { return HB_SQUARE; }
 bool board_is_v2(void) { return HB_V2; }
 bool board_is_175(void) { return false; }
 void display_port_frame_origin(int *px, int *py) { *px = 0; *py = 0; }
-void display_port_panel_to_tank(int px, int py, float *tx, float *ty) { *tx = (float)px; *ty = (float)py; }
+void display_port_panel_to_tank(int px, int py, float *tx, float *ty) {
+#ifdef TANK_LCD35B
+    int x = -1, y = -1; lcd35b_point(px, py, &x, &y); *tx = x; *ty = y;
+#else
+    *tx = (float)px; *ty = (float)py;
+#endif
+}
 void audio_port_prewarm(void) { }
 /* ---- link mode: the page and who saw the finger ---- */
 static bool g_link_page; static int g_link_down, g_link_calls;
@@ -127,8 +160,8 @@ bool link_dev_drift_hit(float x, float y) { (void)x; (void)y; return false; }
 static tank_t T;
 static int64_t g_shelf_press;                              /* touch_port_take_shelf_tap's press time (main.c's waits read it) */
 #define FRAME_MS 40
-static int panel_w(void) { return HB_ROUND ? R_PANEL : HB_SQUARE ? S_PANEL : HB_WATCH ? W_PANEL_W : PANEL_W; }
-static int panel_h(void) { return HB_ROUND ? R_PANEL : HB_SQUARE ? S_PANEL : HB_WATCH ? W_PANEL_H : PANEL_H; }
+static int panel_w(void) { return HB_LCD35B ? 320 : HB_ROUND ? R_PANEL : HB_SQUARE ? S_PANEL : HB_WATCH ? W_PANEL_W : PANEL_W; }
+static int panel_h(void) { return HB_LCD35B ? 480 : HB_ROUND ? R_PANEL : HB_SQUARE ? S_PANEL : HB_WATCH ? W_PANEL_H : PANEL_H; }
 static void chip_from_panel(int px, int py, int *rx, int *ry) {   /* the CST92xx's mirror bits undone (cst9217_read) */
     if (HB_ROUND || HB_SQUARE) {
         int m = s_cst_mirror, pn = cst_panel();
@@ -157,14 +190,19 @@ static bool aim(float x, float y) {
     return true;
 }
 static bool g_draw;                                         /* frames drawn as main.c draws them (the GIVE modal's stamps live in its draw) */
+static bool g_tick_tank;
 static uint16_t g_fb[TANK_W * TANK_H];
 static void frame(void) {
+#ifndef TANK_LCD35B
     if (!g_draw) { g_now += FRAME_MS * 1000; T.clock += FRAME_MS / 1000.0; touch_port_poll(&T); return; }
+#endif
     for (int k = 0; k < 3; k++) {                           /* main.c's tank task: poll, render_frame_begin + poll + the frame's draw, poll */
-        g_now += FRAME_MS * 1000 / 3; T.clock += FRAME_MS / 3000.0;
+        g_now += FRAME_MS * 1000 / 3;
+        if (g_tick_tank) tank_tick(&T, FRAME_MS / 3000.0f, NULL);
+        else T.clock += FRAME_MS / 3000.0;
         if (k == 1) render_frame_begin();
         touch_port_poll(&T);
-        if (k == 1) { if (touch_port_milestones()) render_milestones(&T, g_fb, TANK_W); else if (!setup_active()) render_give_modal(&T, g_fb, TANK_W); }   /* (main.c: not under setup) */
+        if (k == 1 && g_draw) { if (touch_port_milestones()) render_milestones(&T, g_fb, TANK_W); else if (!setup_active()) render_give_modal(&T, g_fb, TANK_W); }   /* (main.c: not under setup) */
     }
 }
 static void hold_for(int ms) { for (int k = 0; k < (ms + FRAME_MS - 1) / FRAME_MS; k++) frame(); }
@@ -2476,16 +2514,75 @@ static void r2g_rule_review(void) {
            "from under the keeper page and CANNOT BE GIVEN at the open: the double spent, a tap 0.3 s on acts)\n", n);
 }
 
+static void axs_light_gesture(void) {
+#ifdef TANK_LCD35B
+    bare();
+    for (int i = 0; i < T.n_fish; i++) { T.fish[i].x = 25; T.fish[i].y = 25; }
+    T.light_auto = false; T.light_override = false; T.light_manual_off = false;
+    T.light_tip_seen = true; T.startled = false; T.tap_count = 0; T.tap_burst_t = 99;
+    g_tick_tank = true; g_axs_release_pattern = 5;
+    float x = TANK_W - 70, y = TANK_H / 2;
+    tap(x, y, 80, 120); hold_for(600);
+    if (T.light_manual_off) TFAIL("AXS: a single tap changed the light");
+    T.tap_count = 0;
+    tap(x, y, 80, 40); tap(x, y, 80, 120); hold_for(600);
+    if (!T.light_manual_off) TFAIL("AXS: two taps separated by 40 ms of FB idle did not turn the light off (count %d)", T.tap_count);
+    tap(x, y, 80, 40); tap(x, y, 80, 120); hold_for(600);
+    if (T.light_manual_off) TFAIL("AXS: the next double tap did not restore the light");
+    /* Hardware polls can cluster before a 50-60 ms display transfer. Two
+       complete idle replies here must end the first tap before that wait. */
+    T.tap_count = 0; T.tap_burst_t = 99;
+    press(x, y, 80); g_down = false;
+    for (int k = 0; k < 2; k++) { g_now += 1000; tank_tick(&T, 0.001f, NULL); touch_port_poll(&T); }
+    if (s_down) TFAIL("AXS: clustered idle reads merged two taps across the display transfer");
+    g_now += 38000; tank_tick(&T, 0.038f, NULL);
+    tap(x, y, 80, 120); hold_for(600);
+    if (!T.light_manual_off) TFAIL("AXS: double tap across clustered polls did not switch the light");
+    T.light_manual_off = false; T.night = false;
+    hold_for(800); press(x, y, 800); lift(120); hold_for(600);
+    if (T.light_manual_off) TFAIL("AXS: a held finger changed the light");
+    g_axs_release_pattern = 0; g_tick_tank = false; T.light_manual_off = false; T.night = false; bare();
+    printf("selftest-touch-port: AXS actual FB-idle path: single tap and hold leave light alone; quick double taps turn it off and on\n");
+#endif
+}
+
+static void axs_hold_faults(void) {
+#ifdef TANK_LCD35B
+    g_axs_one_idle = false; /* menus must also bridge a 40 ms idle burst within a hold */
+    for (g_axs_event = 2; g_axs_event <= 3; g_axs_event++) for (int mode = 1; mode <= 6; mode++) {
+        bare(); touch_port_show_settings(true); hold_for(800);
+        float x, y;
+        if (!find_hit(hit_settings, SET_TAP_ROTATE, &x, &y) || !press(x, y, 120)) { TFAIL("AXS hold: rotation unreachable"); return; }
+        bool locked = T.orient_lock;
+        for (int k = 0; k < 4; k++) {
+            g_axs_fault = mode; hold_for(mode == 2 || mode >= 5 ? 40 : 160);
+            if (T.orient_lock != locked) TFAIL("AXS fault %d committed a held press", mode);
+            g_axs_fault = 0; hold_for(120);
+            if (T.orient_lock != locked) TFAIL("AXS fault %d resumed as another tap", mode);
+        }
+        g_axs_release_pattern = mode == 2 || mode >= 5 ? mode : 0;
+        lift(120); g_axs_release_pattern = 0;
+        if (T.orient_lock == locked) TFAIL("AXS fault %d lost the actual release", mode);
+        hold_for(400);
+        if (T.orient_lock == locked) TFAIL("AXS fault %d repeated after release", mode);
+    }
+    g_axs_event = 2; g_axs_one_idle = false; bare();
+    printf("selftest-touch-port: AXS held buttons: six fault/idle patterns x two contact events commit once; zero-count, FB and FF releases work\n");
+#endif
+}
+
 int selftest_touch_port(void) {
     g_log = getenv("PT_TOUCH_LOG") != NULL;
-    char sav[96]; snprintf(sav, sizeof sav, "/tmp/pocket-tank-selftest-touchport-%s.sav", HB_ROUND ? "bowl" : HB_WATCH ? "watch" : HB_SQUARE ? "square" : "rect");
+    char sav[96]; snprintf(sav, sizeof sav, "/tmp/pocket-tank-selftest-touchport-%s.sav", HB_LCD35B ? "lcd35b" : HB_ROUND ? "bowl" : HB_WATCH ? "watch" : HB_SQUARE ? "square" : "rect");
     setenv("POCKET_TANK_SAVE", sav, 1); remove(sav);   /* (one per world: four worlds' checks at once never share it) */
     tank_init(&T, 9191); progression_boot(&T); progression_setup_done(&T);
     T.trickle_off = true;
     if (!touch_port_init()) { printf("FAIL: touch-port: the port found no chip\n"); return 1; }
     touch_port_set_quiet(false);                             /* (LOADING is over) */
+    axs_light_gesture();
+    axs_hold_faults();
     printf("selftest-touch-port: the %s's port (%s), its calibration and bias on every tap\n",
-           HB_ROUND ? "bowl" : HB_WATCH ? "watch" : HB_SQUARE ? "square" : "1.8", s_cst ? "CST92xx" : s_ft ? "FT3168" : "CST816 via esp_lcd");
+           HB_LCD35B ? "LCD35B" : HB_ROUND ? "bowl" : HB_WATCH ? "watch" : HB_SQUARE ? "square" : "1.8", HB_LCD35B ? "AXS15231B" : s_cst ? "CST92xx" : s_ft ? "FT3168" : "CST816 via esp_lcd");
     firm_press();
     slow_close();
     double_taps();
